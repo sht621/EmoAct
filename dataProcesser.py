@@ -36,7 +36,7 @@ filename = f"log_{now}.csv"
 
 with open(filename, mode='w', newline='') as file:
     writer = csv.writer(file)
-    writer.writerow(['Timestamp', 'Action', 'RRI', 'Temp', 'Acc_x', 'Acc_y', 'Acc_z', 'HR'])
+    writer.writerow(['Timestamp', 'Action', 'HR', 'pNN50'])
 
 def process_data():
     frame_buffer = []
@@ -80,18 +80,13 @@ def process_data():
                 action_label = KINETICS_ID_TO_LABEL.get(pred, "Unknown")
                 print(f"[INFO] 認識結果: {action_label}")
 
-                timestamp, rri, temp, acc_x, acc_y, acc_z = (
-                    message["timestamp"], message["rri"], message["temp"],
-                    message["acc_x"], message["acc_y"], message["acc_z"]
+                timestamp, hr, pnn50= (
+                    message["timestamp"], message["hr"], message["pnn50"]
                 )
-                
-                hr = None
-                if rri is not None:
-                    hr = ecg_analysis.calculate_hr(rri)
 
                 with open(filename, mode='a', newline='') as file:
                     writer = csv.writer(file)
-                    writer.writerow([timestamp, action_label, rri, temp, acc_x, acc_y, acc_z, hr])
+                    writer.writerow([timestamp, action_label, hr, pnn50])
 
                 frame_buffer.clear()
 
