@@ -89,16 +89,6 @@ while True:
                 _, rpeaks = nk.ecg_peaks(ecg_cleaned, sampling_rate=sample_rate)
                 rri = np.diff(rpeaks['ECG_R_Peaks']) / sample_rate
                 avg_rri = round(np.mean(rri) * 1000, 2) if len(rri) > 0 else None
-
-                        # --- ここでECGグラフをプロット ---
-                plt.figure(figsize=(10, 4))
-                nk.signal_plot(ecg_cleaned, sampling_rate=sample_rate)
-                plt.title(f"ECG Signal（Avg RRI: {avg_rri} ms）")
-                plt.scatter(rpeaks['ECG_R_Peaks'], ecg_cleaned[rpeaks['ECG_R_Peaks']],
-                            color='red', label='R-peaks')
-                plt.legend()
-                plt.tight_layout()
-                plt.show()
                 
             except Exception as e:
                 print(f"[ERROR] RRI計算失敗: {e}")
