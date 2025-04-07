@@ -6,126 +6,165 @@ import struct
 import time
 from datetime import datetime
 import neurokit2 as nk
-from bleak import BleakClient
+from bleak import BleakClient, BleakScanner
 from collections import deque
 import numpy as np
 import threading
 import ecg_analysis
 
-# Polar H10のMACアドレス（実際のアドレスに置き換えてください）
-address = "00:22:D0:3B:XX:XX"  # Polar H10 のMACアドレス
-HR_CHAR_UUID = "00002a37-0000-1000-8000-00805f9b34fb"  # Polar H10の心拍数UUID
+# --- Polar H10設定 ---
+HR_CHAR_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
 
-# 最新30個のRRIを保持するためのdeque
 rri_buffer = deque(maxlen=30)
+rri_lock = threading.Lock()
+ble_connected = threading.Event()  # BLE接続成功を知らせるイベント
 
-# Polar H10からRRIデータを受け取る際のコールバック関数
+# --- RRIデータ受信コールバック ---
 def handle_rri_data(sender, data):
-    # データからRRI値（2バイト）を抽出
-    rri = int.from_bytes(data[1:3], byteorder='little')  # RRI（単位: ms）
-    
-    # 最新RRI値をバッファに追加
-    rri_buffer.append(rri)
-    print(f"新しいRRI: {rri} ms")
-    print(f"現在のRRIバッファ: {list(rri_buffer)}")
+    rr_intervals = []
 
-# Polar H10と接続してRRIデータを受け取る非同期関数
+    flags = data[0]
+    index = 1
+
+    # --- Flagsの解析 ---
+    hr_format_16bit = flags & 0x01 != 0
+    sensor_contact_present = flags & 0x02 != 0
+    sensor_contact_supported = flags & 0x04 != 0
+    energy_expended_present = flags & 0x08 != 0
+    rr_interval_present = flags & 0x10 != 0
+
+    # --- Heart Rate値の読み取り ---
+    if hr_format_16bit:
+        heart_rate = int.from_bytes(data[index:index + 2], byteorder='little')
+        index += 2
+    else:
+        heart_rate = data[index]
+        index += 1
+
+    print(f"Heart Rate (raw): {heart_rate} bpm")
+
+    # --- Sensor Contact（任意） ---
+    if sensor_contact_supported:
+        contact_status = "ON" if sensor_contact_present else "OFF"
+        print(f"Sensor contact: {contact_status}")
+
+    # --- Energy Expended（任意） ---
+    if energy_expended_present:
+        energy_expended = int.from_bytes(data[index:index + 2], byteorder='little')
+        index += 2
+        print(f"Energy Expended: {energy_expended} kJ")
+
+    # --- RR-Intervalの取得 ---
+    if rr_interval_present:
+        while index + 1 < len(data):
+            rri = int.from_bytes(data[index:index + 2], byteorder='little') / 1024.0
+            rri_ms = int(rri * 1000)
+            rr_intervals.append(rri_ms)
+            index += 2
+
+    with rri_lock:
+        rri_buffer.extend(rr_intervals)
+
+# --- BLEクライアント非同期処理 ---
 async def run_ble_client():
-    async with BleakClient(address) as client:
-        print(f"接続成功: {address}")
-        
-        # Polar H10 からの通知を開始（RRIデータ受信時にhandle_rri_dataが呼ばれる）
-        await client.start_notify(HR_CHAR_UUID, handle_rri_data)
-        
-        # 通知を受け取る間は処理が続く
-        while True:
-            await asyncio.sleep(1)  # 1秒ごとに非同期処理を実行
+    print("Polar H10 をスキャン中...")
+    devices = await BleakScanner.discover(timeout=5.0)
+    polar = None
+    for d in devices:
+        if d.name and "Polar H10" in d.name:
+            polar = d
+            break
 
-# メイン処理の開始
-async def main():
-    await run_ble_client()
+    if polar is None:
+        print("Polar H10 が見つかりませんでした。")
+        return
 
-# 非同期処理の実行
-asyncio.run(main())
+    try:
+        async with BleakClient(polar.address) as client:
+            print(f"接続成功: {polar.name} ({polar.address})")
+            await client.start_notify(HR_CHAR_UUID, handle_rri_data)
+            ble_connected.set()
+            print("Polar H10 からRRIデータを受信中...")
+            while True:
+                await asyncio.sleep(1)
+    except Exception as e:
+        print(f"接続エラー: {e}")
 
-# ソケット設定
-UBUNTU_IP = "192.168.65.120"
-PORT = 9999
-client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client_socket.connect((UBUNTU_IP, PORT))
-print("[INFO] Ubuntuに接続しました。")
+# --- BLEスレッド起動 ---
+def start_ble_thread():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_ble_client())
 
-# カメラ設定
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    print("カメラが開けませんでした")
-    exit(1)
+# --- カメラとソケット送信処理 ---
+def start_camera_and_socket():
+    UBUNTU_IP = "192.168.65.120"
+    PORT = 9999
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.connect((UBUNTU_IP, PORT))
+    print("[INFO] Ubuntuに接続しました。")
 
-# --- ECGバッファと設定 ---
-sample_rate = 500  # myBeatのサンプリング周波数に合わせる
-ecg_buffer = deque(maxlen=sample_rate * 5)  # 5秒分保持
-buffer_lock = threading.Lock()
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("カメラが開けませんでした")
+        exit(1)
 
-# --- ECG取得スレッド ---
-def ecg_acquisition():
+    frame_counter = 0
+
     while True:
-        # Polar H10からのRRIデータはhandle_rri_data関数で受け取る
-        time.sleep(0.002)  # 約500Hzで取得
+        ret, frame = cap.read()
+        if not ret:
+            print("フレームの読み込みに失敗しました")
+            continue
 
-ecg_thread = threading.Thread(target=ecg_acquisition, daemon=True)
-ecg_thread.start()
+        cv2.imshow("Camera", frame)
 
-frame_counter = 0
+        _, encoded_frame = cv2.imencode('.jpg', frame)
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        print("フレームの読み込みに失敗しました")
-        continue
+        data = {
+            'image': encoded_frame.tobytes()
+        }
 
-    cv2.imshow("Camera", frame)  # 追加：カメラの映像を表示
+        frame_counter += 1
 
-    # フレームをJPEG圧縮
-    _, encoded_frame = cv2.imencode('.jpg', frame)
+        if frame_counter >= 16:
+            frame_counter = 0
 
-    # タイムスタンプ取得
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            with rri_lock:
+                rri_list = list(rri_buffer)
 
-    # --- 画像送信 ---
-    data = {
-        'image': encoded_frame.tobytes()
-    }
-    frame_counter += 1
+            hr = ecg_analysis.calculate_hr(rri_list)
+            pnn50 = ecg_analysis.calculate_pnn50(rri_list)
 
-    # 16フレームごとにRRIとセンサーデータを付加
-    if frame_counter >= 16:
-        frame_counter = 0
+            data.update({
+                'timestamp': timestamp,
+                'HR': hr,
+                'pNN50': pnn50
+            })
 
-        hr = ecg_analysis.calculate_hr(rri_buffer)
-        pnn50 = ecg_analysis.calculate_pnn50(rri_buffer)
+        message = pickle.dumps(data)
+        message = struct.pack("Q", len(message)) + message
+        client_socket.sendall(message)
 
-        # データに追加
-        data.update({
-            'timestamp': timestamp,
-            'HR': hr,
-            'pNN50': pnn50
-        })
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("\n[INFO] 'q'が押されたため、終了します。")
+            break
 
-    # --- データ送信 ---
-    message = pickle.dumps(data)
-    message = struct.pack("Q", len(message)) + message
-    client_socket.sendall(message)
+        time.sleep(0.05)
 
-    print(timestamp)
+    client_socket.close()
+    cap.release()
+    cv2.destroyAllWindows()
+    print("[INFO] 通信終了。")
 
-    # 'q' を押したらループを終了
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        print("\n[INFO] 'q'が押されたため、終了します。")
-        break
+# --- BLEスレッド起動 ---
+ble_thread = threading.Thread(target=start_ble_thread, daemon=True)
+ble_thread.start()
 
-    time.sleep(0.05)  # 適度な遅延
+# --- 接続が完了するまで待機 ---
+print("[INFO] Polar H10への接続を待機中...")
+ble_connected.wait()
+print("[INFO] Polar H10への接続に成功。カメラ送信を開始します。")
 
-client_socket.close()
-cap.release()
-cv2.destroyAllWindows()  # 追加：ウィンドウを閉じる
-print("[INFO] 通信終了。")
+start_camera_and_socket()
