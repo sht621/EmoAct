@@ -1,3 +1,4 @@
+import asyncio
 import cv2
 import socket
 import pickle
@@ -5,25 +6,51 @@ import struct
 import time
 from datetime import datetime
 import neurokit2 as nk
-from rrd import DataReceiver
-from rrd_logger import CSVLogger
+from bleak import BleakClient
 from collections import deque
 import numpy as np
 import threading
+import ecg_analysis
 
+# Polar H10のMACアドレス（実際のアドレスに置き換えてください）
+address = "00:22:D0:3B:XX:XX"  # Polar H10 のMACアドレス
+HR_CHAR_UUID = "00002a37-0000-1000-8000-00805f9b34fb"  # Polar H10の心拍数UUID
 
-# labels.py からラベルを読み込む
-from labels import KINETICS_ID_TO_LABEL
+# 最新30個のRRIを保持するためのdeque
+rri_buffer = deque(maxlen=30)
 
-# UbuntuのIPアドレス
+# Polar H10からRRIデータを受け取る際のコールバック関数
+def handle_rri_data(sender, data):
+    # データからRRI値（2バイト）を抽出
+    rri = int.from_bytes(data[1:3], byteorder='little')  # RRI（単位: ms）
+    
+    # 最新RRI値をバッファに追加
+    rri_buffer.append(rri)
+    print(f"新しいRRI: {rri} ms")
+    print(f"現在のRRIバッファ: {list(rri_buffer)}")
+
+# Polar H10と接続してRRIデータを受け取る非同期関数
+async def run_ble_client():
+    async with BleakClient(address) as client:
+        print(f"接続成功: {address}")
+        
+        # Polar H10 からの通知を開始（RRIデータ受信時にhandle_rri_dataが呼ばれる）
+        await client.start_notify(HR_CHAR_UUID, handle_rri_data)
+        
+        # 通知を受け取る間は処理が続く
+        while True:
+            await asyncio.sleep(1)  # 1秒ごとに非同期処理を実行
+
+# メイン処理の開始
+async def main():
+    await run_ble_client()
+
+# 非同期処理の実行
+asyncio.run(main())
+
+# ソケット設定
 UBUNTU_IP = "192.168.65.120"
 PORT = 9999
-
-# mybeatセンサーデータ受信
-receiver = DataReceiver()
-logger = CSVLogger(receiver, csv_filename="rrd_log.csv", log_interval=1)
-
-# ソケット作成（TCP）
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client_socket.connect((UBUNTU_IP, PORT))
 print("[INFO] Ubuntuに接続しました。")
@@ -42,18 +69,13 @@ buffer_lock = threading.Lock()
 # --- ECG取得スレッド ---
 def ecg_acquisition():
     while True:
-        ecg = logger.receiver.getEcgData()
-        if ecg is not None:
-            with buffer_lock:
-                ecg_buffer.append(ecg)
+        # Polar H10からのRRIデータはhandle_rri_data関数で受け取る
         time.sleep(0.002)  # 約500Hzで取得
 
 ecg_thread = threading.Thread(target=ecg_acquisition, daemon=True)
 ecg_thread.start()
 
 frame_counter = 0
-
-receiver.start()  # データ受信開始
 
 while True:
     ret, frame = cap.read()
@@ -75,43 +97,18 @@ while True:
     }
     frame_counter += 1
 
-        # --- 16フレームごとにRRIとセンサーデータを付加 ---
+    # 16フレームごとにRRIとセンサーデータを付加
     if frame_counter >= 16:
         frame_counter = 0
 
-        with buffer_lock:
-            ecg_array = np.array(ecg_buffer)
-
-        # RRI計算（2秒間以上のECGが必要）
-        if len(ecg_array) >= sample_rate * 2:
-            try:
-                ecg_cleaned = nk.ecg_clean(ecg_array, sampling_rate=sample_rate)
-                _, rpeaks = nk.ecg_peaks(ecg_cleaned, sampling_rate=sample_rate)
-                rri = np.diff(rpeaks['ECG_R_Peaks']) / sample_rate
-                avg_rri = round(np.mean(rri) * 1000, 2) if len(rri) > 0 else None
-                
-            except Exception as e:
-                print(f"[ERROR] RRI計算失敗: {e}")
-                avg_rri = None
-        else:
-            avg_rri = None
-
-        # センサーデータ取得
-        temp = logger.receiver.getTempData()
-        acc_x = logger.receiver.getAccXData()
-        acc_y = logger.receiver.getAccYData()
-        acc_z = logger.receiver.getAccZData()
-
-        print(f"[DEBUG] サンプル数: {len(ecg_array)} RRI: {avg_rri}, Temp: {temp}, Acc: ({acc_x}, {acc_y}, {acc_z})")
+        hr = ecg_analysis.calculate_hr(rri_buffer)
+        pnn50 = ecg_analysis.calculate_pnn50(rri_buffer)
 
         # データに追加
         data.update({
             'timestamp': timestamp,
-            'rri': avg_rri,
-            'temp': temp,
-            'acc_x': acc_x,
-            'acc_y': acc_y,
-            'acc_z': acc_z
+            'HR': hr,
+            'pNN50': pnn50
         })
 
     # --- データ送信 ---
@@ -128,9 +125,7 @@ while True:
 
     time.sleep(0.05)  # 適度な遅延
 
-receiver.stop()  # データ受信を停止
-
+client_socket.close()
 cap.release()
 cv2.destroyAllWindows()  # 追加：ウィンドウを閉じる
-client_socket.close()
 print("[INFO] 通信終了。")
