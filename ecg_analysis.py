@@ -1,19 +1,34 @@
 import numpy as np
 from scipy.signal import welch
 
-def calculate_hr(rri):
-    """ RR間隔(ms) から心拍数(HR) を計算 """
-    if  rri is None or rri == 0:
-        return None
-    return round(60000 / rri, 3)
+def calculate_hr(rri_buffer):
 
-def calculate_pnn50(rr_intervals):
-    """ pNN50を計算 (50ms以上変化したRR間隔の割合) """
-    if len(rr_intervals) < 2:
+    if len(rri_buffer) < 10:  # 10個のRRIがない場合は計算しない
         return None
-    diff_rr = np.diff(rr_intervals)  # RR間隔の差分
-    nn50 = np.sum(np.abs(diff_rr) > 50)  # 50ms以上の変化
-    return (nn50 / len(diff_rr)) * 100
+    
+    # 最新10個のRRIを取り出す
+    last_10_rri = list(rri_buffer)[-10:]
+    # 最新10個のRRIの平均を計算
+    avg_rri = np.mean(last_10_rri)
+    # 平均RRIからHRを計算
+    hr = 60 / (avg_rri / 1000)  
+
+    return round(hr, 3)
+
+
+def calculate_pnn50(rri_buffer):
+    
+    if len(rri_buffer) < 30 :
+        return None
+    
+    # RRI間の差を計算
+    rri_diffs = np.diff(rri_buffer)
+    # 50ms以上の差を持つペアをカウント
+    count_pnn50 = np.sum(rri_diffs >= 50)
+    # pNN50を計算
+    pnn50 = (count_pnn50 / len(rri_buffer) * 100)
+
+    return pnn50
 
 def calculate_sdnn(rr_intervals):
     """ RR間隔の標準偏差 (SDNN) を計算 """
