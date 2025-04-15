@@ -13,6 +13,7 @@ import threading
 import ecg_analysis
 import sys
 
+
 # --- Polar H10設定 ---
 HR_CHAR_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
 
@@ -22,6 +23,8 @@ ble_connected = threading.Event()  # BLE接続成功を知らせるイベント
 
 # --- RRIデータ受信コールバック ---
 def handle_rri_data(sender, data):
+    global latest_heart_rate  # ← これが必要！
+
     rr_intervals = []
 
     flags = data[0]
@@ -40,7 +43,9 @@ def handle_rri_data(sender, data):
         heart_rate = data[index]
         index += 1
 
-    print(f"Heart Rate (raw): {heart_rate} bpm")
+    latest_heart_rate = heart_rate
+
+    # print(f"Heart Rate (raw): {heart_rate} bpm")
 
     if sensor_contact_supported:
         contact_status = "ON" if sensor_contact_present else "OFF"
@@ -122,7 +127,6 @@ def start_camera_and_socket():
             cv2.imshow("Camera", frame)
 
             _, encoded_frame = cv2.imencode('.jpg', frame)
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
             data = {
                 'image': encoded_frame.tobytes()
@@ -135,8 +139,10 @@ def start_camera_and_socket():
                 with rri_lock:
                     rri_list = list(rri_buffer)
 
-                hr = ecg_analysis.calculate_hr(rri_list)
+                hr = latest_heart_rate 
                 pnn50 = ecg_analysis.calculate_pnn50(rri_list)
+
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
 
                 data.update({
                     'timestamp': timestamp,
@@ -147,6 +153,7 @@ def start_camera_and_socket():
             message = pickle.dumps(data)
             message = struct.pack("Q", len(message)) + message
             client_socket.sendall(message)
+
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 print("\n[INFO] 'q'が押されたため、終了します。")
