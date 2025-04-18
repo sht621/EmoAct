@@ -44,26 +44,21 @@ with open(filename, mode='w', newline='') as file:
 # データ処理スレッド
 def process_data():
     frame_buffer = []
-    current_action_label = "Unknown"
-    current_hr = "N/A"
-    current_pnn50 = "N/A"
-    latest_timestamp = "N/A"
+    action_label = "Unknown"
+    hr = None
+    pnn50 = None
+    timestamp = None
 
     # FPS用変数
     last_frame_time = time.time()
     fps_list = deque(maxlen=16)
     avg_fps = 0.0
 
-    # 前回記録した内容
-    last_logged = {
-        "timestamp": None,
-        "action": None,
-        "hr": None,
-        "pnn50": None
-    }
+
 
     while True:
         try:
+            start_time = time.time()
             message = data_queue.get()
             if message is None:
                 break
@@ -75,13 +70,8 @@ def process_data():
                 print("[ERROR] 画像のデコードに失敗しました。")
                 continue
 
-            # --- HR / pNN50 / timestamp を常に更新 ---
-            latest_timestamp = message.get("timestamp", latest_timestamp)
-            current_hr = message.get("HR", current_hr)
-            current_pnn50 = message.get("pNN50", current_pnn50)
-
             # --- YOLO 検出 ---
-            results = yolo_model(frame, conf=0.8)
+            results = yolo_model(frame, conf=0.5, verbose=False)
             person_crop = None
             for r in results:
                 for box in r.boxes:
@@ -115,40 +105,30 @@ def process_data():
                     outputs = model(video_tensor)
                     pred = outputs.argmax(1).item()
 
-                current_action_label = KINETICS_ID_TO_LABEL.get(pred, "Unknown")
-                print(f"[INFO] 認識結果: {current_action_label}")
+                action_label = KINETICS_ID_TO_LABEL.get(pred, "Unknown")
+
+                # --- HR / pNN50 / timestamp を常に更新 ---
+                timestamp = message.get("timestamp", timestamp)
+                hr = message.get("HR", hr)
+                pnn50 = message.get("pNN50", pnn50)
 
                 # --- 重複回避：前回と全く同じならスキップ ---
-                if (
-                    current_action_label != last_logged["action"]
-                    or current_hr != last_logged["hr"]
-                    or current_pnn50 != last_logged["pnn50"]
-                    or latest_timestamp != last_logged["timestamp"]
-                ):
-                    with open(filename, mode='a', newline='') as file:
-                        writer = csv.writer(file)
-                        writer.writerow([
-                            latest_timestamp, current_action_label,
-                            current_hr, current_pnn50
-                        ])
 
-                    # ログ済みデータを更新
-                    last_logged.update({
-                        "timestamp": latest_timestamp,
-                        "action": current_action_label,
-                        "hr": current_hr,
-                        "pnn50": current_pnn50
-                    })
+                with open(filename, mode='a', newline='') as file:
+                    writer = csv.writer(file)
+                    writer.writerow([
+                        timestamp, action_label, hr, pnn50
+                    ])           
 
                 frame_buffer.clear()
 
             # --- 表示 ---
             display_frame = frame.copy()
-            cv2.putText(display_frame, f"Action: {current_action_label}", (10, 30),
+            cv2.putText(display_frame, f"Action: {action_label}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-            cv2.putText(display_frame, f"HR: {current_hr}", (10, 70),
+            cv2.putText(display_frame, f"HR: {hr}", (10, 70),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
-            cv2.putText(display_frame, f"pNN50: {current_pnn50}", (10, 110),
+            cv2.putText(display_frame, f"pNN50: {pnn50}", (10, 110),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
             cv2.putText(display_frame, f"FPS: {avg_fps:.2f}", (10, 150),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
